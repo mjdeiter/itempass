@@ -25,69 +25,61 @@ local SCRIPT_VERSION = "1.0"
 -- CONFIG
 ---------------------------------------------------------------------
 
--- If true, the chain will loop forever:
--- After the last member returns the item, it starts again at the first member.
 local AUTO_REPEAT_CHAIN = false
-
--- Delay (seconds) to allow a remote toon to /useitem before asking it back.
-local REMOTE_USE_DELAY = 3
+local REMOTE_USE_DELAY  = 3
 
 ---------------------------------------------------------------------
 -- PATHS / CONSTANTS
 ---------------------------------------------------------------------
-local MQROOT             = mq.TLO.MacroQuest.Path() or '.'
-local ITEM_FILE_PATH     = MQROOT .. '/itempass_items.txt'
-local PROFILE_FILE_PATH  = MQROOT .. '/itempass_profiles.txt'
-local HIDDEN_FILE_PATH   = MQROOT .. '/itempass_hidden.txt'
+local MQROOT            = mq.TLO.MacroQuest.Path() or '.'
+local ITEM_FILE_PATH    = MQROOT .. '/itempass_items.txt'
+local PROFILE_FILE_PATH = MQROOT .. '/itempass_profiles.txt'
+local HIDDEN_FILE_PATH  = MQROOT .. '/itempass_hidden.txt'
 
 local SLOT_MIN = 0
 local SLOT_MAX = 30
-local TRADE_TIMEOUT = 20
+local TRADE_TIMEOUT      = 20
 local TRADE_MAX_ATTEMPTS = 3
-local MAX_LOG = 200
+local MAX_LOG            = 200
 
 ---------------------------------------------------------------------
 -- STATE
 ---------------------------------------------------------------------
-local savedItems           = {}
-local selectedSavedItem    = 1
-local manualItemName       = ''
-local activeItemName       = ''
+local savedItems             = {}
+local selectedSavedItem      = 1
+local manualItemName         = ''
+local activeItemName         = ''
 
-local inventoryItems       = {}
+local inventoryItems         = {}
 local selectedInventoryIndex = 0
 
--- chainMembers: { {name='Toon', enabled=true/false, present=true/false}, ... }
-local chainMembers         = {}
-local chainStartName       = nil
+local chainMembers           = {}
+local chainStartName         = nil
 
--- profiles[name] = { itemName='...', startName='...', members = { [toon]=bool } }
-local profiles             = {}
-local currentProfileName   = ''
-local profileNameBuffer    = ''
+local profiles               = {}
+local currentProfileName     = ''
+local profileNameBuffer      = ''
 
-local running              = false
-local paused               = false
-local showUI               = true
+local running                = false
+local paused                 = false
+local showUI                 = true
 
-local statusLog            = {}
+local statusLog              = {}
 
-local lastZone             = mq.TLO.Zone.ShortName() or ''
-local lastZoning           = mq.TLO.Me.Zoning() or false
+local lastZone               = mq.TLO.Zone.ShortName() or ''
+local lastZoning             = mq.TLO.Me.Zoning() or false
 
--- Internal controller-flow state
 local scm = {
-    list      = {},   -- enabled+present members excluding controller
+    list      = {},
     index     = 0,
-    phase     = 'IDLE',   -- IDLE / WAIT_HAVE_ITEM / GIVE_TO_MEMBER / MEMBER_USE / RETURN_TO_ME
+    phase     = 'IDLE',
     member    = nil,
     attempts  = 0,
     startTime = 0,
 }
 
--- Hidden items
-local hiddenItems  = {}
-local hiddenLookup = {}
+local hiddenItems            = {}
+local hiddenLookup           = {}
 
 ---------------------------------------------------------------------
 -- UTILITIES
@@ -97,6 +89,26 @@ local function trim(s)
     return s:gsub('^%s+', ''):gsub('%s+$', '')
 end
 
+local function timestamp()
+    return os.date('%H:%M:%S')
+end
+
+local function addStatus(fmt, ...)
+    local msg = string.format(fmt, ...)
+    local line = string.format('[%s] %s', timestamp(), msg)
+    table.insert(statusLog, line)
+    if #statusLog > MAX_LOG then
+        table.remove(statusLog, 1)
+    end
+    print(line)
+end
+
+local function fileExists(path)
+    local f = io.open(path, 'r')
+    if f then f:close() return true end
+    return false
+end
+
 ---------------------------------------------------------------------
 -- HIDDEN ITEM LIST
 ---------------------------------------------------------------------
@@ -104,19 +116,8 @@ local function rebuildHiddenLookup()
     hiddenLookup = {}
     for _, nm in ipairs(hiddenItems) do
         local key = trim(nm):lower()
-        if key ~= '' then
-            hiddenLookup[key] = true
-        end
+        if key ~= '' then hiddenLookup[key] = true end
     end
-end
-
-local function fileExists(path)
-    local f = io.open(path, 'r')
-    if f then
-        f:close()
-        return true
-    end
-    return false
 end
 
 local function loadHiddenItems()
@@ -134,19 +135,16 @@ local function loadHiddenItems()
 
     for line in f:lines() do
         local nm = trim(line)
-        if nm ~= '' then
-            table.insert(hiddenItems, nm)
-        end
+        if nm ~= '' then table.insert(hiddenItems, nm) end
     end
     f:close()
-
     rebuildHiddenLookup()
 end
 
 local function saveHiddenItems()
     local f = io.open(HIDDEN_FILE_PATH, 'w')
     if not f then
-        print('[ItemPass] ERROR: Cannot write hidden item file.')
+        print('[ItemPass] ERROR: Cannot write hidden file.')
         return
     end
     for _, nm in ipairs(hiddenItems) do
@@ -187,6 +185,7 @@ local function unhideItemByName(name)
             table.insert(newList, nm)
         end
     end
+
     hiddenItems = newList
     saveHiddenItems()
 
@@ -200,6 +199,8 @@ end
 ---------------------------------------------------------------------
 -- AUTOCOMPLETE
 ---------------------------------------------------------------------
+local lastAutocompleteChoice = nil   -- <----- KEY FIX VARIABLE
+
 local function getItemSuggestions(prefix)
     prefix = trim(prefix or '')
     if prefix == '' then return {} end
@@ -208,7 +209,7 @@ local function getItemSuggestions(prefix)
     local suggestions = {}
     local seen = {}
 
-    local function addName(nm)
+    local function add(nm)
         nm = trim(nm or '')
         if nm == '' then return end
         local key = nm:lower()
@@ -219,37 +220,27 @@ local function getItemSuggestions(prefix)
         end
     end
 
+    -- Saved items always included
     for _, nm in ipairs(savedItems) do
-        addName(nm)
+        add(nm)
     end
 
+    -- Inventory items (filtered by hidden)
     for _, it in ipairs(inventoryItems) do
-        addName(it.name)
+        if not isItemHidden(it.name) then
+            add(it.name)
+        end
     end
 
-    table.sort(suggestions, function(a, b)
+    table.sort(suggestions, function(a,b)
         return a:lower() < b:lower()
     end)
 
     return suggestions
 end
 
-local function timestamp()
-    return os.date('%H:%M:%S')
-end
-
-local function addStatus(fmt, ...)
-    local text = string.format(fmt, ...)
-    local line = string.format('[%s] %s', timestamp(), text)
-    table.insert(statusLog, line)
-    if #statusLog > MAX_LOG then
-        table.remove(statusLog, 1)
-    end
-    print(line)
-end
-
 ---------------------------------------------------------------------
--- INVENTORY SCANNING (EMU-SAFE)
+-- INVENTORY SCANNING
 ---------------------------------------------------------------------
 local function countItemByName(name)
     name = trim(name)
@@ -263,7 +254,7 @@ local function countItemByName(name)
             local nm = trim(it.Name() or '')
             local cslots = it.Container() or 0
 
-            if nm ~= '' and nm:lower() == target and cslots == 0 then
+            if cslots == 0 and nm:lower() == target then
                 total = total + 1
             end
 
@@ -272,7 +263,7 @@ local function countItemByName(name)
                     local inner = it.Item(i)
                     if inner() and inner.ID() ~= 0 then
                         local nm2 = trim(inner.Name() or '')
-                        if nm2 ~= '' and nm2:lower() == target then
+                        if nm2:lower() == target then
                             total = total + 1
                         end
                     end
@@ -320,13 +311,11 @@ local function scanInventory()
     inventoryItems = {}
     for _,n in ipairs(tn) do
         local c = top[n]
-        local disp = (c > 1) and string.format('%s (x%d)', n, c) or n
-        table.insert(inventoryItems, {name=n, display=disp})
+        table.insert(inventoryItems, {name=n, display=(c>1) and string.format('%s (x%d)', n, c) or n})
     end
     for _,n in ipairs(bn) do
         local c = bag[n]
-        local disp = (c > 1) and string.format('%s (x%d)', n, c) or n
-        table.insert(inventoryItems, {name=n, display=disp})
+        table.insert(inventoryItems, {name=n, display=(c>1) and string.format('%s (x%d)', n, c) or n})
     end
 
     selectedInventoryIndex = 0
@@ -349,7 +338,7 @@ local function loadItemList()
     end
     f:close()
 
-    selectedSavedItem = (#savedItems > 0) and 1 or 0
+    selectedSavedItem = (#savedItems>0) and 1 or 0
 end
 
 local function saveItemList()
@@ -358,7 +347,9 @@ local function saveItemList()
         addStatus('ERROR: Cannot write item file.')
         return
     end
-    for _,nm in ipairs(savedItems) do f:write(nm..'\n') end
+    for _,nm in ipairs(savedItems) do
+        f:write(nm..'\n')
+    end
     f:close()
 end
 
@@ -367,7 +358,7 @@ local function saveCurrentItem()
     if nm == '' then return end
 
     for _,v in ipairs(savedItems) do
-        if v:lower() == nm:lower() then
+        if v:lower()==nm:lower() then
             addStatus('"%s" already saved.', nm)
             return
         end
@@ -380,33 +371,34 @@ local function saveCurrentItem()
 end
 
 local function deleteSelectedSavedItem()
-    if #savedItems == 0 or selectedSavedItem <= 0 then return end
+    if #savedItems==0 or selectedSavedItem<=0 then return end
     local nm = savedItems[selectedSavedItem]
     table.remove(savedItems, selectedSavedItem)
-    if selectedSavedItem > #savedItems then selectedSavedItem = #savedItems end
-    if selectedSavedItem == 0 and #savedItems > 0 then selectedSavedItem = 1 end
+    if selectedSavedItem > #savedItems then selectedSavedItem=#savedItems end
+    if selectedSavedItem==0 and #savedItems>0 then selectedSavedItem=1 end
     saveItemList()
     addStatus('Deleted saved item "%s".', nm)
 end
 
 ---------------------------------------------------------------------
--- CHAIN MEMBERS
+-- CHAIN MEMBERS / PROFILES
 ---------------------------------------------------------------------
 local function validateChainStart()
     if chainStartName then
-        local ok = false
+        local ok=false
         for _,m in ipairs(chainMembers) do
-            if m.name == chainStartName and m.enabled and m.present then
-                ok = true
+            if m.name==chainStartName and m.enabled and m.present then
+                ok=true
                 break
             end
         end
-        if not ok then chainStartName = nil end
+        if not ok then chainStartName=nil end
     end
+
     if not chainStartName then
         for _,m in ipairs(chainMembers) do
             if m.enabled and m.present then
-                chainStartName = m.name
+                chainStartName=m.name
                 break
             end
         end
@@ -414,22 +406,22 @@ local function validateChainStart()
 end
 
 local function refreshChainMembers()
-    for _,m in ipairs(chainMembers) do m.present = false end
+    for _,m in ipairs(chainMembers) do m.present=false end
 
     local gc = mq.TLO.Group.Members() or 0
-    local seenNames = {}
+    local seen={}
 
-    for slot = 0, gc do
-        local gm = mq.TLO.Group.Member(slot)
+    for slot=0,gc do
+        local gm=mq.TLO.Group.Member(slot)
         if gm() then
-            local nm = trim(gm.Name() or '')
-            if nm ~= '' then
-                seenNames[nm] = true
-                local found = false
+            local nm=trim(gm.Name() or '')
+            if nm~='' then
+                seen[nm]=true
+                local found=false
                 for _,m in ipairs(chainMembers) do
-                    if m.name == nm then
-                        m.present = true
-                        found = true
+                    if m.name==nm then
+                        m.present=true
+                        found=true
                         break
                     end
                 end
@@ -441,12 +433,12 @@ local function refreshChainMembers()
     end
 
     local me = trim(mq.TLO.Me.Name() or '')
-    if me ~= '' then
-        local found = false
+    if me~='' then
+        local found=false
         for _,m in ipairs(chainMembers) do
-            if m.name == me then
-                m.present = true
-                found = true
+            if m.name==me then
+                m.present=true
+                found=true
                 break
             end
         end
@@ -457,7 +449,7 @@ local function refreshChainMembers()
 
     for _,m in ipairs(chainMembers) do
         if not m.present and m.enabled then
-            m.enabled = false
+            m.enabled=false
         end
     end
 
@@ -472,20 +464,20 @@ local function refreshChainMembers()
 end
 
 local function purgeMissingMembers()
-    local kept = {}
+    local keep={}
     for _,m in ipairs(chainMembers) do
-        if m.present then table.insert(kept, m) end
+        if m.present then table.insert(keep,m) end
     end
-    chainMembers = kept
+    chainMembers = keep
     validateChainStart()
     addStatus('Purged missing members. Remaining: %d.', #chainMembers)
 end
 
 local function buildSCMList()
     local me = trim(mq.TLO.Me.Name() or '')
-    local list = {}
+    local list={}
     for _,m in ipairs(chainMembers) do
-        if m.enabled and m.present and m.name ~= me then
+        if m.enabled and m.present and m.name~=me then
             table.insert(list, m.name)
         end
     end
@@ -496,7 +488,7 @@ end
 -- PROFILES
 ---------------------------------------------------------------------
 local function loadProfiles()
-    profiles = {}
+    profiles={}
     if not fileExists(PROFILE_FILE_PATH) then return end
 
     local f = io.open(PROFILE_FILE_PATH, 'r')
@@ -506,23 +498,19 @@ local function loadProfiles()
         local pname,item,start,rest = line:match('^(.-)|(.-)|(.-)|(.*)$')
         if not (pname and item and start and rest) then
             pname,item,rest = line:match('^(.-)|(.-)|(.*)$')
-            start = ''
+            start=''
         end
         if pname and item then
-            pname  = trim(pname)
-            item   = trim(item)
-            start  = trim(start)
-            if pname ~= '' and item ~= '' then
+            pname=trim(pname)
+            item =trim(item)
+            start=trim(start)
+            if pname~='' and item~='' then
                 local map={}
                 for pair in rest:gmatch('[^,]+') do
                     local nm,v = pair:match('(.-):([01])')
                     if nm then map[trim(nm)] = (v=='1') end
                 end
-                profiles[pname] = {
-                    itemName  = item,
-                    startName = (start~='' and start or nil),
-                    members   = map,
-                }
+                profiles[pname]={ itemName=item, startName=(start~='' and start or nil), members=map }
             end
         end
     end
@@ -553,10 +541,10 @@ end
 
 local function saveCurrentProfile()
     local nm = trim(profileNameBuffer or '')
-    if nm == '' then return end
+    if nm=='' then return end
 
     local item = trim(activeItemName)
-    if item == '' then
+    if item=='' then
         addStatus('ERROR: No active item selected.')
         return
     end
@@ -565,7 +553,7 @@ local function saveCurrentProfile()
 
     local map={}
     for _,m in ipairs(chainMembers) do
-        map[m.name] = m.enabled
+        map[m.name]=m.enabled
     end
 
     profiles[nm] = {
@@ -618,7 +606,7 @@ local function loadProfileByName(pname)
 end
 
 ---------------------------------------------------------------------
--- TRADE / REMOTE ACTIONS
+-- TRADE & REMOTE USE
 ---------------------------------------------------------------------
 local function useItemLocal(name)
     addStatus('Using "%s" on controller.', name)
@@ -636,53 +624,50 @@ local function requestRemoteUse(toon, item)
 end
 
 ---------------------------------------------------------------------
--- FSM RESET
+-- FSM RESET / START / PAUSE
 ---------------------------------------------------------------------
 local function resetSCMState()
-    scm.list      = {}
-    scm.index     = 0
-    scm.member    = nil
-    scm.phase     = 'IDLE'
-    scm.attempts  = 0
-    scm.startTime = 0
+    scm.list={}
+    scm.index=0
+    scm.member=nil
+    scm.phase='IDLE'
+    scm.attempts=0
+    scm.startTime=0
 end
 
 local function resetChain()
-    running = false
-    paused  = false
+    running=false
+    paused=false
     resetSCMState()
     addStatus('Chain reset.')
 end
 
----------------------------------------------------------------------
--- START / PAUSE
----------------------------------------------------------------------
 local function startChain()
     local item = trim(activeItemName)
-    if item == '' then item = trim(manualItemName) end
-    if item == '' then
+    if item=='' then item=trim(manualItemName) end
+    if item=='' then
         addStatus('ERROR: No item selected.')
         return
     end
-    activeItemName = item
+    activeItemName=item
 
-    local me = trim(mq.TLO.Me.Name() or '')
-    scm.list = buildSCMList()
-    if #scm.list == 0 then
-        addStatus('ERROR: No enabled group members besides the controller.')
+    local me  = trim(mq.TLO.Me.Name() or '')
+    scm.list  = buildSCMList()
+    if #scm.list==0 then
+        addStatus('ERROR: No enabled members.')
         return
     end
 
-    scm.index     = 1
-    scm.member    = scm.list[scm.index]
-    scm.phase     = 'WAIT_HAVE_ITEM'
-    scm.attempts  = 0
-    scm.startTime = os.time()
+    scm.index    = 1
+    scm.member   = scm.list[1]
+    scm.phase    = 'WAIT_HAVE_ITEM'
+    scm.attempts = 0
+    scm.startTime= os.time()
 
-    running = true
-    paused  = false
+    running=true
+    paused=false
 
-    addStatus('Starting chain. Controller=%s. Order: %s.', me, table.concat(scm.list, ' -> '))
+    addStatus('Starting chain. Controller=%s. Order=%s', me, table.concat(scm.list,'->'))
     addStatus('The item must start on the controller (%s).', me)
 end
 
@@ -693,92 +678,89 @@ local function togglePause()
 end
 
 ---------------------------------------------------------------------
--- ZONE HANDLING
+-- ZONING
 ---------------------------------------------------------------------
 local function handleZone()
     local zoning = mq.TLO.Me.Zoning() or false
-    if zoning then
-        lastZoning = true
-        return
-    end
+    if zoning then lastZoning=true return end
 
     local z = mq.TLO.Zone.ShortName() or ''
-    if lastZoning or z ~= lastZone then
+    if lastZoning or z~=lastZone then
         addStatus('Zoned into %s.', z)
-        lastZone   = z
-        lastZoning = false
+        lastZone=z
+        lastZoning=false
         resetSCMState()
     end
 end
 
 ---------------------------------------------------------------------
--- CONTROLLER-BASED TICK
+-- FSM TICK
 ---------------------------------------------------------------------
 local function scmTick()
-    if scm.phase == 'IDLE' or not running or paused then return end
+    if scm.phase=='IDLE' or not running or paused then return end
 
     local me   = trim(mq.TLO.Me.Name() or '')
     local item = trim(activeItemName)
-    if item == '' then return end
+    if item=='' then return end
 
     scm.member = scm.list[scm.index]
     local now  = os.time()
 
-    if scm.phase == 'WAIT_HAVE_ITEM' then
-        if countItemByName(item) > 0 then
+    if scm.phase=='WAIT_HAVE_ITEM' then
+        if countItemByName(item)>0 then
             addStatus('Controller has "%s". Sending to %s.', item, scm.member)
-            scm.phase     = 'GIVE_TO_MEMBER'
-            scm.attempts  = 0
-            scm.startTime = now
+            scm.phase='GIVE_TO_MEMBER'
+            scm.attempts=0
+            scm.startTime=now
             requestItemTransfer(scm.member, me, item)
         end
         return
     end
 
-    if scm.phase == 'GIVE_TO_MEMBER' then
+    if scm.phase=='GIVE_TO_MEMBER' then
         if now - scm.startTime >= TRADE_TIMEOUT then
             addStatus('Assuming %s received "%s". Requesting remote use.', scm.member, item)
-            scm.phase     = 'MEMBER_USE'
-            scm.startTime = now
+            scm.phase='MEMBER_USE'
+            scm.startTime=now
             requestRemoteUse(scm.member, item)
         end
         return
     end
 
-    if scm.phase == 'MEMBER_USE' then
+    if scm.phase=='MEMBER_USE' then
         if now - scm.startTime >= REMOTE_USE_DELAY then
             addStatus('Requesting return of "%s" from %s.', item, scm.member)
-            scm.phase     = 'RETURN_TO_ME'
-            scm.startTime = now
+            scm.phase='RETURN_TO_ME'
+            scm.startTime=now
             requestItemTransfer(me, scm.member, item)
         end
         return
     end
 
-    if scm.phase == 'RETURN_TO_ME' then
-        if countItemByName(item) > 0 then
+    if scm.phase=='RETURN_TO_ME' then
+        if countItemByName(item)>0 then
             addStatus('Item "%s" returned from %s.', item, scm.member)
 
             if scm.index < #scm.list then
-                scm.index     = scm.index + 1
-                scm.member    = scm.list[scm.index]
-                scm.phase     = 'WAIT_HAVE_ITEM'
-                scm.attempts  = 0
-                scm.startTime = now
+                scm.index = scm.index + 1
+                scm.member= scm.list[scm.index]
+                scm.phase = 'WAIT_HAVE_ITEM'
+                scm.attempts=0
+                scm.startTime=now
                 addStatus('Proceeding to next member: %s.', scm.member)
             else
                 if AUTO_REPEAT_CHAIN then
-                    scm.index     = 1
-                    scm.member    = scm.list[scm.index]
-                    scm.phase     = 'WAIT_HAVE_ITEM'
-                    scm.attempts  = 0
-                    scm.startTime = now
-                    addStatus('Full round complete. Restarting at %s.', scm.member)
+                    scm.index    = 1
+                    scm.member   = scm.list[1]
+                    scm.phase    = 'WAIT_HAVE_ITEM'
+                    scm.attempts = 0
+                    scm.startTime= now
+                    addStatus('Full round complete. Restarting.')
                 else
                     addStatus('Full round complete. Stopping chain.')
                     resetSCMState()
-                    running = false
-                    paused  = false
+                    running=false
+                    paused=false
                 end
             end
             return
@@ -787,13 +769,12 @@ local function scmTick()
         if now - scm.startTime >= TRADE_TIMEOUT then
             scm.attempts = scm.attempts + 1
             if scm.attempts < TRADE_MAX_ATTEMPTS then
-                addStatus('Still waiting for "%s" from %s; retrying (%d/%d).',
+                addStatus('Still waiting for "%s" from %s; retry (%d/%d).',
                     item, scm.member, scm.attempts, TRADE_MAX_ATTEMPTS)
-                scm.startTime = now
+                scm.startTime=now
                 requestItemTransfer(me, scm.member, item)
             else
-                addStatus('ERROR: Could not retrieve "%s" from %s after %d attempts.',
-                    item, scm.member, TRADE_MAX_ATTEMPTS)
+                addStatus('ERROR: Could not retrieve "%s" from %s.', item, scm.member)
                 resetChain()
             end
         end
@@ -801,9 +782,6 @@ local function scmTick()
     end
 end
 
----------------------------------------------------------------------
--- DISPATCH
----------------------------------------------------------------------
 local function chainTick()
     scmTick()
 end
@@ -811,21 +789,22 @@ end
 ---------------------------------------------------------------------
 -- BINDS
 ---------------------------------------------------------------------
-mq.bind('/itempassui',    function() showUI = not showUI end)
-mq.bind('/itempassstart', function() startChain() end)
-mq.bind('/itempasspause', function() togglePause() end)
-mq.bind('/itempassreset', function() resetChain() end)
+mq.bind('/itempassui', function() showUI = not showUI end)
+mq.bind('/itempassstart', startChain)
+mq.bind('/itempasspause', togglePause)
+mq.bind('/itempassreset', resetChain)
 
 ---------------------------------------------------------------------
--- GUI
+-- GUI (Autocomplete Spam FIX APPLIED HERE)
 ---------------------------------------------------------------------
 local function renderUI()
     if not showUI then return end
 
     local ok, err = pcall(function()
+
         local open = ImGui.Begin('ItemPass (Project Lazarus EMU)', true)
         if not open then
-            showUI = false
+            showUI=false
             ImGui.End()
             return
         end
@@ -837,6 +816,7 @@ local function renderUI()
 
         manualItemName = ImGui.InputText('Item Name##item_input', manualItemName or '', 64)
 
+        -- Autocomplete engine
         local suggestions = getItemSuggestions(manualItemName)
 
         ImGui.SameLine()
@@ -850,49 +830,85 @@ local function renderUI()
             end
         end
 
-        if manualItemName and trim(manualItemName) ~= '' then
+        -- Suggestion count
+        if manualItemName and trim(manualItemName)~='' then
             ImGui.SameLine()
-            if #suggestions > 0 then
-                ImGui.TextDisabled(string.format('(%d match%s)', #suggestions, #suggestions~=1 and 'es' or ''))
+            if #suggestions>0 then
+                ImGui.TextDisabled(string.format('(%d match%s)', #suggestions, (#suggestions~=1 and 'es' or '')))
             else
                 ImGui.TextDisabled('(no matches)')
             end
         end
 
+        ----------------------------------------------------
+        -- FIXED AUTOCOMPLETE (NO SPAM)
+        ----------------------------------------------------
+        local chosen = nil
         if #suggestions > 0 then
             if ImGui.BeginCombo('Autocomplete##item_autocomplete', 'Select match...') then
                 for _, nm in ipairs(suggestions) do
-                    local sel = (nm == manualItemName)
-                    if ImGui.Selectable(nm, sel) then
-                        manualItemName = nm
-                        activeItemName = nm
-                        addStatus('Autocomplete selected "%s".', nm)
+                    local selected = (nm == manualItemName)
+
+                    if ImGui.Selectable(nm, selected) then
+                        chosen = nm
                     end
-                    if sel then ImGui.SetItemDefaultFocus() end
+
+                    if selected then
+                        ImGui.SetItemDefaultFocus()
+                    end
                 end
                 ImGui.EndCombo()
             end
         end
 
+        -- Apply autocomplete choice ONCE per user action
+        if chosen and chosen ~= lastAutocompleteChoice then
+            manualItemName = chosen
+            activeItemName = chosen
+            addStatus('Autocomplete selected "%s".', chosen)
+
+            lastAutocompleteChoice = chosen
+        elseif not chosen then
+            -- Reset last choice when user closes dropdown
+            lastAutocompleteChoice = nil
+        end
+
+        ----------------------------------------------------
+        -- SAVE ITEM NAME
+        ----------------------------------------------------
         local canSaveItem = trim(manualItemName) ~= ''
         if not canSaveItem then ImGui.BeginDisabled(true) end
-        if ImGui.Button('Save Item Name##btn_saveitem') then saveCurrentItem() end
+        if ImGui.Button('Save Item Name##btn_saveitem') then
+            saveCurrentItem()
+        end
         if not canSaveItem then ImGui.EndDisabled() end
 
+        ----------------------------------------------------
+        -- SCAN INVENTORY
+        ----------------------------------------------------
         ImGui.SameLine()
-        if ImGui.Button('Scan Inventory##btn_scaninv') then scanInventory() end
+        if ImGui.Button('Scan Inventory##btn_scaninv') then
+            scanInventory()
+        end
 
+        ----------------------------------------------------
+        -- HIDE/UNHIDE
+        ----------------------------------------------------
         ImGui.SameLine()
         local canHide = trim(manualItemName) ~= ''
         if not canHide then ImGui.BeginDisabled(true) end
-        local hidden   = isItemHidden(manualItemName)
+        local hidden = isItemHidden(manualItemName)
         local hideText = hidden and 'Unhide Item##unhide' or 'Hide Item##hide'
         if ImGui.Button(hideText) then
-            if hidden then unhideItemByName(manualItemName) else hideItemByName(manualItemName) end
+            if hidden then unhideItemByName(manualItemName)
+            else hideItemByName(manualItemName) end
             scanInventory()
         end
         if not canHide then ImGui.EndDisabled() end
 
+        ----------------------------------------------------
+        -- SAVED ITEMS
+        ----------------------------------------------------
         if #savedItems > 0 then
             local preview = savedItems[selectedSavedItem] or 'Select...'
             if ImGui.BeginCombo('Saved Items##combo_saved', preview) then
@@ -900,30 +916,38 @@ local function renderUI()
                     local sel = (i == selectedSavedItem)
                     if ImGui.Selectable(nm, sel) then
                         selectedSavedItem = i
-                        manualItemName    = nm
-                        activeItemName    = nm
+                        manualItemName = nm
+                        activeItemName = nm
                     end
                     if sel then ImGui.SetItemDefaultFocus() end
                 end
                 ImGui.EndCombo()
             end
-            if ImGui.Button('Delete Selected##del_saved') then deleteSelectedSavedItem() end
+
+            if ImGui.Button('Delete Selected##del_saved') then
+                deleteSelectedSavedItem()
+            end
+
         else
             ImGui.TextDisabled('No saved items.')
         end
 
+        ----------------------------------------------------
+        -- INVENTORY COMBO
+        ----------------------------------------------------
         if #inventoryItems > 0 then
             local preview = 'Select...'
-            if selectedInventoryIndex > 0 and inventoryItems[selectedInventoryIndex] then
+            if selectedInventoryIndex>0 and inventoryItems[selectedInventoryIndex] then
                 preview = inventoryItems[selectedInventoryIndex].display
             end
+
             if ImGui.BeginCombo('Inventory Items##combo_inv', preview) then
                 for i,it in ipairs(inventoryItems) do
                     local sel = (i == selectedInventoryIndex)
                     if ImGui.Selectable(it.display, sel) then
                         selectedInventoryIndex = i
-                        manualItemName         = it.name
-                        activeItemName         = it.name
+                        manualItemName = it.name
+                        activeItemName = it.name
                     end
                     if sel then ImGui.SetItemDefaultFocus() end
                 end
@@ -933,7 +957,7 @@ local function renderUI()
             ImGui.TextDisabled('Inventory not scanned yet.')
         end
 
-        ImGui.Text('Active Item: %s', activeItemName ~= '' and activeItemName or '<none>')
+        ImGui.Text('Active Item: %s', activeItemName~='' and activeItemName or '<none>')
         ImGui.Separator()
 
         ----------------------------------------------------
@@ -946,10 +970,10 @@ local function renderUI()
 
         for _,m in ipairs(chainMembers) do
             local controller = trim(mq.TLO.Me.Name() or '')
-            local mark       = m.enabled and '[X]' or '[ ]'
-            local selfTag    = (m.name == controller) and ' [You]' or ''
-            local missingTag = not m.present and ' [missing]' or ''
-            local startTag   = (m.name == chainStartName) and ' (Start)' or ''
+            local mark = m.enabled and '[X]' or '[ ]'
+            local selfTag = (m.name==controller) and ' [You]' or ''
+            local missingTag = (not m.present) and ' [missing]' or ''
+            local startTag = (m.name==chainStartName) and ' (Start)' or ''
 
             local label = string.format('%s %s%s%s%s', mark, m.name, selfTag, startTag, missingTag)
 
@@ -975,13 +999,12 @@ local function renderUI()
         local list = buildSCMList()
 
         if #list == 0 then
-            ImGui.TextWrapped('Enable at least one other present member to form a chain.')
+            ImGui.TextWrapped('Enable at least one other member...')
         else
-            local parts = {}
-            table.insert(parts, me .. ' [controller]')
-            for _,nm in ipairs(list) do table.insert(parts, nm) end
+            local parts={me .. ' [controller]'}
+            for _,nm in ipairs(list) do table.insert(parts,nm) end
             table.insert(parts, me .. ' [end]')
-            ImGui.TextWrapped('%s', table.concat(parts, ' -> '))
+            ImGui.TextWrapped('%s', table.concat(parts,' -> '))
         end
 
         ----------------------------------------------------
@@ -990,13 +1013,15 @@ local function renderUI()
         if not running then
             if ImGui.Button('Start##start') then startChain() end
         else
-            if ImGui.Button(paused and 'Resume##resume' or 'Pause##pause') then togglePause() end
+            if ImGui.Button(paused and 'Resume##resume' or 'Pause##pause') then
+                togglePause()
+            end
         end
+
         ImGui.SameLine()
         if ImGui.Button('Reset##reset') then resetChain() end
 
         ImGui.Text('Status: %s', running and (paused and 'Paused' or 'Running') or 'Stopped')
-
         ImGui.Separator()
 
         ----------------------------------------------------
@@ -1007,20 +1032,20 @@ local function renderUI()
         profileNameBuffer = ImGui.InputText('Profile Name##prof_name', profileNameBuffer or '', 64)
 
         ImGui.SameLine()
-        local canSaveProf = trim(profileNameBuffer) ~= ''
+        local canSaveProf = trim(profileNameBuffer)~=''
         if not canSaveProf then ImGui.BeginDisabled(true) end
         if ImGui.Button('Save Profile##save_prof') then saveCurrentProfile() end
         if not canSaveProf then ImGui.EndDisabled() end
 
-        local pnames = {}
-        for n,_ in pairs(profiles) do table.insert(pnames, n) end
+        local pnames={}
+        for n,_ in pairs(profiles) do table.insert(pnames,n) end
         table.sort(pnames)
 
-        if #pnames > 0 then
-            local preview = currentProfileName ~= '' and currentProfileName or 'Select...'
+        if #pnames>0 then
+            local preview = currentProfileName~='' and currentProfileName or 'Select...'
             if ImGui.BeginCombo('Load Profile##load_prof', preview) then
                 for _,n in ipairs(pnames) do
-                    local sel = (n == currentProfileName)
+                    local sel = (n==currentProfileName)
                     if ImGui.Selectable(n, sel) then
                         if not sel then loadProfileByName(n) end
                     end
@@ -1045,19 +1070,20 @@ local function renderUI()
         ImGui.End()
     end)
 
-    if not ok then addStatus('GUI ERROR: %s', tostring(err)) end
+    if not ok then
+        addStatus('GUI ERROR: %s', tostring(err))
+    end
 end
 
 ---------------------------------------------------------------------
 -- INIT & LOOP
 ---------------------------------------------------------------------
 local function init()
-    -- Updated credit & version display
     print("\atOriginally created by Alektra <Lederhosen>")
     print("\agitempass.lua v" .. SCRIPT_VERSION .. " Loaded")
 
     addStatus('ItemPass (EMU) loading...')
-    addStatus('Run this script only on the character that will coordinate the item for the group.')
+    addStatus('Run this script only on the controller toon.')
 
     loadHiddenItems()
     loadItemList()
@@ -1067,7 +1093,7 @@ local function init()
 
     mq.imgui.init('itempass_ui', renderUI)
 
-    addStatus('Ready. Hotkeys: /itempassui /itempassstart /itempasspause /itempassreset')
+    addStatus('Ready. Commands: /itempassui /itempassstart /itempasspause /itempassreset')
 end
 
 init()
