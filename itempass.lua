@@ -13,13 +13,19 @@
 --   - Hidden items are filtered from Inventory dropdown & inventory-based autocomplete
 --   - Hidden items are NOT removed from Saved Items
 
+-- itempass.lua v1.1.0
+-- Minor Update:
+--   + Added advanced autocomplete (prefix > substring > fuzzy ranking)
+--   + Limited autocomplete to top 10 suggestions
+--   + Improved UI selection behavior (no spam)
+
 local mq    = require('mq')
 local ImGui = require('ImGui')
 
 ---------------------------------------------------------------------
 -- VERSION / CREDITS
 ---------------------------------------------------------------------
-local SCRIPT_VERSION = "1.0"
+local SCRIPT_VERSION = "1.1.0" -- semantic version: MAJOR.MINOR.PATCH
 
 ---------------------------------------------------------------------
 -- CONFIG
@@ -41,6 +47,8 @@ local SLOT_MAX = 30
 local TRADE_TIMEOUT      = 20
 local TRADE_MAX_ATTEMPTS = 3
 local MAX_LOG            = 200
+
+local MAX_SUGGESTIONS    = 10 -- max autocomplete entries shown
 
 ---------------------------------------------------------------------
 -- STATE
@@ -81,6 +89,9 @@ local scm = {
 local hiddenItems            = {}
 local hiddenLookup           = {}
 
+-- advanced autocomplete state
+local lastAutocompleteChoice = nil
+
 ---------------------------------------------------------------------
 -- UTILITIES
 ---------------------------------------------------------------------
@@ -94,7 +105,7 @@ local function timestamp()
 end
 
 local function addStatus(fmt, ...)
-    local msg = string.format(fmt, ...)
+    local msg  = string.format(fmt, ...)
     local line = string.format('[%s] %s', timestamp(), msg)
     table.insert(statusLog, line)
     if #statusLog > MAX_LOG then
@@ -197,10 +208,46 @@ local function unhideItemByName(name)
 end
 
 ---------------------------------------------------------------------
--- AUTOCOMPLETE
+-- ADVANCED AUTOCOMPLETE HELPERS
 ---------------------------------------------------------------------
-local lastAutocompleteChoice = nil   -- <----- KEY FIX VARIABLE
 
+-- Simple Levenshtein distance for fuzzy match on short strings
+local function levenshtein(a, b)
+    a = a or ''
+    b = b or ''
+    local la, lb = #a, #b
+    if la == 0 then return lb end
+    if lb == 0 then return la end
+
+    local prev = {}
+    local curr = {}
+
+    for j = 0, lb do
+        prev[j] = j
+    end
+
+    for i = 1, la do
+        curr[0] = i
+        local ca = a:sub(i, i)
+        for j = 1, lb do
+            local cb = b:sub(j, j)
+            local cost = (ca == cb) and 0 or 1
+            local del  = prev[j]   + 1
+            local ins  = curr[j-1] + 1
+            local sub  = prev[j-1] + cost
+            local v    = del
+            if ins < v then v = ins end
+            if sub < v then v = sub end
+            curr[j] = v
+        end
+        prev, curr = curr, prev
+    end
+
+    return prev[lb]
+end
+
+-- Return ranked suggestions:
+-- Each element: {name=string, display=string, score=number}
 local function getItemSuggestions(prefix)
     prefix = trim(prefix or '')
     if prefix == '' then return {} end
@@ -209,32 +256,70 @@ local function getItemSuggestions(prefix)
     local suggestions = {}
     local seen = {}
 
-    local function add(nm)
+    local function considerName(nm)
         nm = trim(nm or '')
         if nm == '' then return end
         local key = nm:lower()
         if seen[key] then return end
-        if key:find(search, 1, true) then
-            seen[key] = true
-            table.insert(suggestions, nm)
+        seen[key] = true
+
+        -- scoring:
+        -- 0  = starts with search  (best)
+        -- 1  = contains search
+        -- 2+ = fuzzy (levenshtein on prefix vs leading part)
+        local score
+        local startPos = key:find(search, 1, true)
+        if startPos == 1 then
+            score = 0
+        elseif startPos ~= nil then
+            score = 1
+        else
+            local slice = key:sub(1, #search)
+            score = 2 + levenshtein(search, slice)
         end
+
+        local display = nm
+        if score == 0 then
+            display = '★ ' .. nm        -- highlight strong matches
+        elseif score == 1 then
+            display = '• ' .. nm
+        end
+
+        table.insert(suggestions, {
+            name    = nm,
+            display = display,
+            score   = score,
+        })
     end
 
-    -- Saved items always included
+    -- Saved items first
     for _, nm in ipairs(savedItems) do
-        add(nm)
+        considerName(nm)
     end
 
-    -- Inventory items (filtered by hidden)
+    -- Inventory items (skip hidden)
     for _, it in ipairs(inventoryItems) do
         if not isItemHidden(it.name) then
-            add(it.name)
+            considerName(it.name)
         end
     end
 
-    table.sort(suggestions, function(a,b)
-        return a:lower() < b:lower()
+    -- sort by score, then alpha
+    table.sort(suggestions, function(a, b)
+        if a.score ~= b.score then
+            return a.score < b.score
+        end
+        return a.name:lower() < b.name:lower()
     end)
+
+    -- trim to max suggestions
+    if #suggestions > MAX_SUGGESTIONS then
+        local trimmed = {}
+        for i = 1, MAX_SUGGESTIONS do
+            trimmed[i] = suggestions[i]
+        end
+        suggestions = trimmed
+    end
 
     return suggestions
 end
@@ -409,14 +494,12 @@ local function refreshChainMembers()
     for _,m in ipairs(chainMembers) do m.present=false end
 
     local gc = mq.TLO.Group.Members() or 0
-    local seen={}
 
     for slot=0,gc do
         local gm=mq.TLO.Group.Member(slot)
         if gm() then
             local nm=trim(gm.Name() or '')
             if nm~='' then
-                seen[nm]=true
                 local found=false
                 for _,m in ipairs(chainMembers) do
                     if m.name==nm then
@@ -789,20 +872,21 @@ end
 ---------------------------------------------------------------------
 -- BINDS
 ---------------------------------------------------------------------
-mq.bind('/itempassui', function() showUI = not showUI end)
+mq.bind('/itempassui',    function() showUI = not showUI end)
 mq.bind('/itempassstart', startChain)
 mq.bind('/itempasspause', togglePause)
 mq.bind('/itempassreset', resetChain)
 
 ---------------------------------------------------------------------
--- GUI (Autocomplete Spam FIX APPLIED HERE)
+-- GUI (Advanced Autocomplete + Spam Fix)
 ---------------------------------------------------------------------
 local function renderUI()
     if not showUI then return end
 
     local ok, err = pcall(function()
 
-        local open = ImGui.Begin('ItemPass (Project Lazarus EMU)', true)
+        -- Window title now shows script name + version
+        local open = ImGui.Begin(string.format('itempass.lua v%s', SCRIPT_VERSION), true)
         if not open then
             showUI=false
             ImGui.End()
@@ -816,7 +900,7 @@ local function renderUI()
 
         manualItemName = ImGui.InputText('Item Name##item_input', manualItemName or '', 64)
 
-        -- Autocomplete engine
+        -- Build suggestions (ranked, max N, hidden-filtered)
         local suggestions = getItemSuggestions(manualItemName)
 
         ImGui.SameLine()
@@ -830,7 +914,6 @@ local function renderUI()
             end
         end
 
-        -- Suggestion count
         if manualItemName and trim(manualItemName)~='' then
             ImGui.SameLine()
             if #suggestions>0 then
@@ -841,19 +924,20 @@ local function renderUI()
         end
 
         ----------------------------------------------------
-        -- FIXED AUTOCOMPLETE (NO SPAM)
+        -- ADVANCED AUTOCOMPLETE DROPDOWN
         ----------------------------------------------------
         local chosen = nil
         if #suggestions > 0 then
             if ImGui.BeginCombo('Autocomplete##item_autocomplete', 'Select match...') then
-                for _, nm in ipairs(suggestions) do
-                    local selected = (nm == manualItemName)
+                for _, entry in ipairs(suggestions) do
+                    local label    = entry.display
+                    local sel      = (entry.name == manualItemName)
 
-                    if ImGui.Selectable(nm, selected) then
-                        chosen = nm
+                    if ImGui.Selectable(label, sel) then
+                        chosen = entry.name
                     end
 
-                    if selected then
+                    if sel then
                         ImGui.SetItemDefaultFocus()
                     end
                 end
@@ -866,10 +950,9 @@ local function renderUI()
             manualItemName = chosen
             activeItemName = chosen
             addStatus('Autocomplete selected "%s".', chosen)
-
             lastAutocompleteChoice = chosen
         elseif not chosen then
-            -- Reset last choice when user closes dropdown
+            -- reset when dropdown is closed
             lastAutocompleteChoice = nil
         end
 
@@ -900,8 +983,11 @@ local function renderUI()
         local hidden = isItemHidden(manualItemName)
         local hideText = hidden and 'Unhide Item##unhide' or 'Hide Item##hide'
         if ImGui.Button(hideText) then
-            if hidden then unhideItemByName(manualItemName)
-            else hideItemByName(manualItemName) end
+            if hidden then
+                unhideItemByName(manualItemName)
+            else
+                hideItemByName(manualItemName)
+            end
             scanInventory()
         end
         if not canHide then ImGui.EndDisabled() end
@@ -916,8 +1002,8 @@ local function renderUI()
                     local sel = (i == selectedSavedItem)
                     if ImGui.Selectable(nm, sel) then
                         selectedSavedItem = i
-                        manualItemName = nm
-                        activeItemName = nm
+                        manualItemName    = nm
+                        activeItemName    = nm
                     end
                     if sel then ImGui.SetItemDefaultFocus() end
                 end
@@ -946,8 +1032,8 @@ local function renderUI()
                     local sel = (i == selectedInventoryIndex)
                     if ImGui.Selectable(it.display, sel) then
                         selectedInventoryIndex = i
-                        manualItemName = it.name
-                        activeItemName = it.name
+                        manualItemName         = it.name
+                        activeItemName         = it.name
                     end
                     if sel then ImGui.SetItemDefaultFocus() end
                 end
@@ -970,10 +1056,10 @@ local function renderUI()
 
         for _,m in ipairs(chainMembers) do
             local controller = trim(mq.TLO.Me.Name() or '')
-            local mark = m.enabled and '[X]' or '[ ]'
-            local selfTag = (m.name==controller) and ' [You]' or ''
+            local mark       = m.enabled and '[X]' or '[ ]'
+            local selfTag    = (m.name==controller) and ' [You]' or ''
             local missingTag = (not m.present) and ' [missing]' or ''
-            local startTag = (m.name==chainStartName) and ' (Start)' or ''
+            local startTag   = (m.name==chainStartName) and ' (Start)' or ''
 
             local label = string.format('%s %s%s%s%s', mark, m.name, selfTag, startTag, missingTag)
 
