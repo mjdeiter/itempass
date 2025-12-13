@@ -1,4 +1,4 @@
--- itempass.lua (Project Lazarus EMU / MQNext / E3Next)
+-- ItemPass (Project Lazarus EMU / MQNext / E3Next)
 -- Controller-based item passing script:
 --   Controller starts with the item
 --   -> sends item to each enabled group member in order
@@ -13,7 +13,7 @@
 --   - Hidden items are filtered from Inventory dropdown & inventory-based autocomplete
 --   - Hidden items are NOT removed from Saved Items
 
--- itempass.lua v1.1.0
+-- ItemPass v1.1.0
 -- Minor Update:
 --   + Added advanced autocomplete (prefix > substring > fuzzy ranking)
 --   + Limited autocomplete to top 10 suggestions
@@ -886,7 +886,7 @@ local function renderUI()
     local ok, err = pcall(function()
 
         -- Window title now shows script name + version
-        local open = ImGui.Begin(string.format('itempass.lua v%s', SCRIPT_VERSION), true)
+        local open = ImGui.Begin(string.format('ItemPass v%s', SCRIPT_VERSION), true)
         if not open then
             showUI=false
             ImGui.End()
@@ -1166,7 +1166,7 @@ end
 ---------------------------------------------------------------------
 local function init()
     print("\atOriginally created by Alektra <Lederhosen>")
-    print("\agitempass.lua v" .. SCRIPT_VERSION .. " Loaded")
+    print("\agItemPass v" .. SCRIPT_VERSION .. " Loaded")
 
     addStatus('ItemPass (EMU) loading...')
     addStatus('Run this script only on the controller toon.')
