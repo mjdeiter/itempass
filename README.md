@@ -1,6 +1,6 @@
 ItemPass for Project Lazarus EMU
 A controller-based automated item-passing system for MacroQuest Next (EMU Build) + E3Next
-itempass.lua is an advanced, fully EMU-compatible automation script that safely handles controlled item passing within a group—perfect for clickies, buff items, or rotation-based item usage.
+ItemPass.lua is an advanced, fully EMU-compatible automation script that safely handles controlled item passing within a group—perfect for clickies, buff items, or rotation-based item usage.
 Designed specifically for the Project Lazarus EverQuest EMU server using MacroQuest Next (MQNext) and E3Next.
 
 Features
@@ -53,11 +53,11 @@ Profile saving and loading
 
 
 Installation
-1. Download itempass.lua
+1. Download ItemPass.lua
 Place the file into your MQNext Lua folder:
-<Your MQ Root>/Lua/itempass.lua
+<Your MQ Root>/Lua/ItemPass.lua
 Example path:
-C:\Games\Project_Lazarus\MQNext\Lua\itempass.lua
+C:\Games\Project_Lazarus\MQNext\Lua\ItemPass.lua
 2. Requirements
 
 MacroQuest Next (EMU Build)
@@ -156,9 +156,9 @@ ItemPass automatically retries up to 3 times
 If trade fails repeatedly, chain resets safely
 
 
-Version & Credits
+Credits
 Originally created by Alektra <Lederhosen>
-itempass.lua v1.0
+
 Support development: https://buymeacoffee.com/shablagu
 
 Contributing
