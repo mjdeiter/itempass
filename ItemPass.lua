@@ -13,7 +13,7 @@
 --   - Hidden items are filtered from Inventory dropdown & inventory-based autocomplete
 --   - Hidden items are NOT removed from Saved Items
 
--- ItemPass v1.1.0
+-- ItemPass v1.1.2
 -- Minor Update:
 --   + Added advanced autocomplete (prefix > substring > fuzzy ranking)
 --   + Limited autocomplete to top 10 suggestions
@@ -25,7 +25,7 @@ local ImGui = require('ImGui')
 ---------------------------------------------------------------------
 -- VERSION / CREDITS
 ---------------------------------------------------------------------
-local SCRIPT_VERSION = "1.1.0" -- semantic version: MAJOR.MINOR.PATCH
+local SCRIPT_VERSION = "1.1.2" -- semantic version: MAJOR.MINOR.PATCH
 
 ---------------------------------------------------------------------
 -- CONFIG
@@ -557,13 +557,34 @@ local function purgeMissingMembers()
 end
 
 local function buildSCMList()
-    local me = trim(mq.TLO.Me.Name() or '')
-    local list={}
-    for _,m in ipairs(chainMembers) do
-        if m.enabled and m.present and m.name~=me then
+    local list = {}
+
+    -- v1.1.2 FIX:
+    --  * Controller checkbox now matters (controller included only if enabled)
+    --  * (Start) member is first in chain (rotation)
+    for _, m in ipairs(chainMembers) do
+        if m.enabled and m.present then
             table.insert(list, m.name)
         end
     end
+
+    -- Rotate so Start is first (if valid)
+    if chainStartName and #list > 1 then
+        local startIdx = nil
+        for i, nm in ipairs(list) do
+            if nm == chainStartName then
+                startIdx = i
+                break
+            end
+        end
+        if startIdx and startIdx > 1 then
+            local rotated = {}
+            for i = startIdx, #list do table.insert(rotated, list[i]) end
+            for i = 1, startIdx - 1 do table.insert(rotated, list[i]) end
+            list = rotated
+        end
+    end
+
     return list
 end
 
@@ -735,6 +756,7 @@ local function startChain()
     activeItemName=item
 
     local me  = trim(mq.TLO.Me.Name() or '')
+    validateChainStart()
     scm.list  = buildSCMList()
     if #scm.list==0 then
         addStatus('ERROR: No enabled members.')
@@ -790,6 +812,16 @@ local function scmTick()
     local now  = os.time()
 
     if scm.phase=='WAIT_HAVE_ITEM' then
+        -- v1.1.2 FIX: If it is the controller's turn (and controller is enabled),
+        -- click/use locally via a durable FSM state.
+        if scm.member == me then
+            if countItemByName(item) > 0 then
+                scm.phase = 'USE_LOCAL'
+                scm.startTime = now
+            end
+            return
+        end
+
         if countItemByName(item)>0 then
             addStatus('Controller has "%s". Sending to %s.', item, scm.member)
             scm.phase='GIVE_TO_MEMBER'
@@ -800,7 +832,36 @@ local function scmTick()
         return
     end
 
-    if scm.phase=='GIVE_TO_MEMBER' then
+    
+    if scm.phase=='USE_LOCAL' then
+        useItemLocal(item)
+
+        if scm.index < #scm.list then
+            scm.index = scm.index + 1
+            scm.member= scm.list[scm.index]
+            scm.phase = 'WAIT_HAVE_ITEM'
+            scm.attempts=0
+            scm.startTime=now
+            addStatus('Controller used "%s". Proceeding to next member: %s.', item, scm.member)
+        else
+            if AUTO_REPEAT_CHAIN then
+                scm.index    = 1
+                scm.member   = scm.list[1]
+                scm.phase    = 'WAIT_HAVE_ITEM'
+                scm.attempts = 0
+                scm.startTime= now
+                addStatus('Controller used "%s". Full round complete. Restarting.', item)
+            else
+                addStatus('Controller used "%s". Full round complete. Stopping chain.', item)
+                resetSCMState()
+                running=false
+                paused=false
+            end
+        end
+        return
+    end
+
+if scm.phase=='GIVE_TO_MEMBER' then
         if now - scm.startTime >= TRADE_TIMEOUT then
             addStatus('Assuming %s received "%s". Requesting remote use.', scm.member, item)
             scm.phase='MEMBER_USE'
