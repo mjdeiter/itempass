@@ -10,7 +10,8 @@ ItemPass is a deterministic, EMU-safe item circulation tool for the
 It allows a controller character to pass an item through a configurable group
 chain so each member can click/use it in sequence.
 
-<img width="763" height="894" alt="image" src="https://github.com/user-attachments/assets/831f333f-6f19-40e6-9249-240974df375a" />
+<img width="577" height="724" alt="image" src="https://github.com/user-attachments/assets/c0712235-dbb7-4027-8d29-a68ad68c7e4d" />
+
 
 
 ---
