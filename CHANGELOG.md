@@ -6,6 +6,76 @@ The format follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.2.4] – 2026-01-19
+
+### Fixed
+- Corrected `requestItemTransfer` command order  
+  (reverted to original `/e3bct <to> /giveme <from> "<item>"` to restore proper pull logic)
+
+### Internal
+- Added detailed logging to `requestItemTransfer` for improved debugging and traceability
+
+---
+
+## [1.2.3] – 2026-01-19
+
+### Fixed
+- Restored original `requestItemTransfer` execution order  
+  (`/e3bct <from> /giveme "%s" <to>`) to ensure correct giver-side execution
+- Ensured **One-Way Trade** completes as a true one-way handoff  
+  (no `/useitem`, no return pass)
+
+---
+
+## [1.2.2] – 2026-01-19
+
+### Fixed
+- Corrected `/e3bct` command order in `requestItemTransfer`  
+  (swapped `from` / `to` to fix giver vs recipient logic)
+
+### Changed
+- **One-Way Trade** now hands items directly to the target only  
+  (skips chain execution and does not invoke `/useitem`)
+
+### Internal
+- Improved logging to confirm successful one-way handoff completion
+
+---
+
+## [1.2.1] – 2026-01-19
+
+### Changed
+- Removed `<Any Member>` option from **One-Way Target**  
+  (explicit target selection now required)
+- Default **One-Way Target** to the first enabled non-controller member if unset
+
+### Fixed
+- Status logging now occurs **only** when the target actually changes, preventing log spam
+
+---
+
+## [1.2.0] – 2026-01-19
+
+### Added
+- **One-Way Trade** option  
+  - Passes items through the chain (with `/useitem`)
+  - Does **not** return from the final (or specified) target
+- **One-Way Target** dropdown  
+  - Supports `<Any Member>` and live group member list
+- Full profile persistence for all ItemPass settings
+
+---
+
+## [1.1.4] – 2026-01-19
+
+### Changed
+- Added advanced autocomplete ranking  
+  (prefix → substring → fuzzy match)
+- Limited autocomplete results to top 10 entries
+- Improved UI selection behavior to prevent spam and flicker
+
+---
+
 ## [1.1.3] – 2026-01-02
 
 ### Fixed
